@@ -10,7 +10,7 @@ from src.utils.tools import NamespaceWithDefaults, MultiHeadWrapper
 
 from src.models.layers.embed import TimeEmbedding
 from src.models.layers.revin import RevIN
-from src.models.layers.prediction_head import ClassificationHead, ForecastingHead, ReconstructionHead, EmbeddingHead, RetrievalAugmentedHead
+from src.models.layers.prediction_head import ClassificationHead, ForecastingHead, ReconstructionHead, EmbeddingHead, RetrievalAugmentedHead, GlobalReconstructionHead, GlobalClassificationHead
 from src.models.layers.get_encoder import get_transformer_backbone
 
 class TS_Encoder(nn.Module):
@@ -36,8 +36,8 @@ class TS_Encoder(nn.Module):
         self.num_patches = (max(self.seq_len_channel, self.patch_len) - self.patch_len) // self.patch_stride_len + 1
         # self.total_len = self.seq_len_channel * self.n_channels + self.n_channels + 1
         
-        self.channel_special_tokens = configs.model_name == "TraceEncoder"
-        self.dec_shape = "BTD" if configs.model_name == "TraceEncoder" else "else"
+        self.channel_special_tokens = (configs.model_name == "TraceEncoder" and self.encoder_type == "patchTST")
+        self.dec_shape = "BTD" if (configs.model_name == "TraceEncoder" and self.encoder_type == "patchTST") else "else"
         # Normalization, patching and embedding
         self.normalizer = RevIN(
             num_features=1, affine=configs.getattr("revin_affine", False)
@@ -60,6 +60,96 @@ class TS_Encoder(nn.Module):
         # Transformer backbone
         self.d_model = configs.d_model
         self.encoder = get_transformer_backbone(configs)  
+
+        if self.encoder_type in ["TimesNet", "TS2Vec", "TimeMixer", "TOTEM"]:
+            
+            if self.encoder_type == "TimesNet":
+                from src.models.TimesNet import Model as TimesNetModel
+                configs.task_name = "imputation"
+                configs.seq_len = configs.seq_len_channel
+                configs.pred_len = configs.getattr("forecast_horizon", 0)
+                configs.enc_in = configs.n_channels
+                configs.c_out = configs.n_channels
+                configs.d_ff = configs.getattr("d_ff", configs.d_model * 4)
+                configs.top_k = configs.getattr("top_k", 5)
+                configs.num_kernels = configs.getattr("num_kernels", 6)
+                
+                configs.label_len = 0 
+                configs.moving_avg = 25        
+                configs.factor = 1            
+                configs.dropout = configs.getattr("dropout", 0.1)
+                configs.embed = 'timeF'        
+                configs.freq = 'h'             
+                configs.output_attention = False 
+                
+                self.local_encoder = TimesNetModel(configs)
+                
+            elif self.encoder_type == "TS2Vec":
+                from src.models.ts2vec import TS2Vec
+                input_dims = configs.n_channels
+                output_dims = configs.d_model
+                hidden_dims = configs.getattr("d_ff", 64)
+                depth = configs.getattr("e_layers", 10)
+                
+                self.local_encoder = TS2Vec(
+                    input_dims=input_dims, 
+                    output_dims=output_dims, 
+                    hidden_dims=hidden_dims, 
+                    depth=depth
+                ) 
+                
+            elif self.encoder_type == "TimeMixer":
+                from src.models.TimeMixer import Model as TimeMixerModel
+                
+                configs.task_name = "imputation"
+                configs.seq_len = configs.seq_len_channel
+                configs.pred_len = configs.getattr("forecast_horizon", 0)
+                configs.label_len = 0
+                configs.enc_in = configs.n_channels
+                configs.dec_in = configs.n_channels
+                configs.c_out = configs.n_channels
+                configs.d_model = configs.getattr("d_model", 384)
+                configs.d_ff = configs.getattr("d_ff", configs.d_model * 4)
+                configs.e_layers = configs.getattr("e_layers", 3)
+                configs.d_layers = configs.getattr("d_layers", 1)
+                configs.n_heads = configs.getattr("n_heads", 8)
+                
+                configs.down_sampling_layers = configs.getattr("down_sampling_layers", 3)
+                configs.down_sampling_window = configs.getattr("down_sampling_window", 2)
+                configs.down_sampling_method = configs.getattr("down_sampling_method", "avg")
+                configs.channel_independence = configs.getattr("channel_independence", 1)
+                configs.use_future_temporal_feature = configs.getattr("use_future_temporal_feature", 0)
+                
+                configs.decomp_method = configs.getattr("decomp_method", "moving_avg")
+                configs.moving_avg = configs.getattr("moving_avg", 25)
+                configs.use_norm = configs.getattr("use_norm", 1)
+                
+                configs.drop_path = configs.getattr("drop_path", 0.1)
+                configs.dropout = configs.getattr("dropout", 0.1)
+                configs.factor = configs.getattr("factor", 1)
+                configs.embed = configs.getattr("embed", 'timeF')
+                configs.freq = configs.getattr("freq", 'h')
+                configs.activation = configs.getattr("activation", "gelu")
+                configs.output_attention = configs.getattr("output_attention", False)
+                
+                self.local_encoder = TimeMixerModel(configs)
+                
+            elif self.encoder_type == "TOTEM":
+                from pypots.imputation import TOTEM
+                
+                # 16의 배수(192)로 강제 보정
+                self.totem_seq_len = ((configs.seq_len_channel + 15) // 16) * 16
+                
+                self.local_encoder = TOTEM(
+                    n_steps=self.totem_seq_len,  # 186 대신 보정된 192를 전달
+                    n_features=configs.n_channels,
+                    d_block_hidden=configs.getattr("d_model", 384),          
+                    n_residual_layers=configs.getattr("e_layers", 3),        
+                    d_residual_hidden=configs.getattr("d_ff", configs.d_model * 4), 
+                    d_embedding=configs.getattr("d_model", 384),             
+                    n_embeddings=512,                                        
+                    epochs=1 
+                )
 
         # Prediction Head
         self.head = self._get_head(self.task_name)
@@ -102,22 +192,37 @@ class TS_Encoder(nn.Module):
             })
         else:
             if task_name == TASKS.PRETRAINING:
-                return MultiHeadWrapper({
-                    "reconstruct_head": ReconstructionHead(
-                        self.configs.n_channels,
-                        self.configs.d_model,
-                        self.configs.patch_len,
-                        self.configs.getattr("dropout", 0.1),
-                        self.configs.getattr("orth_gain", 1.41),
-                    ),
-                    "classification_head": ClassificationHead(
-                        self.configs.n_channels,
-                        self.configs.d_model,
-                        self.configs.num_class,
-                        self.configs.getattr("dropout", 0.1),
-                        self.configs.getattr("view", "global"),
-                    )
-                })
+                if self.encoder_type in ["TimesNet", "TS2Vec", "TimeMixer", "TOTEM"]:
+                    return MultiHeadWrapper({
+                        "reconstruct_head": GlobalReconstructionHead(
+                            self.configs.n_channels,
+                            self.configs.d_model,
+                            self.configs.patch_len,
+                            self.configs.getattr("dropout", 0.1)
+                        ),
+                        "classification_head": GlobalClassificationHead(
+                            self.configs.d_model,
+                            self.configs.num_class,
+                            self.configs.getattr("dropout", 0.1)
+                        )
+                    })
+                else :
+                    return MultiHeadWrapper({
+                        "reconstruct_head": ReconstructionHead(
+                            self.configs.n_channels,
+                            self.configs.d_model,
+                            self.configs.patch_len,
+                            self.configs.getattr("dropout", 0.1),
+                            self.configs.getattr("orth_gain", 1.41),
+                        ),
+                        "classification_head": ClassificationHead(
+                            self.configs.n_channels,
+                            self.configs.d_model,
+                            self.configs.num_class,
+                            self.configs.getattr("dropout", 0.1),
+                            self.configs.getattr("view", "global"),
+                        )
+                    })
             elif task_name == TASKS.RECONSTRUCTION:
                 return ReconstructionHead(
                     self.configs.d_model,
@@ -168,23 +273,16 @@ class TS_Encoder(nn.Module):
         x_enc : [B, C, L] Time-series data
         pretrain_mask  : [B, C, L] Data that is masked but still attended to via mask-tokens
         input_mask : [B, C, L]
-            Input mask for the time-series data that is unobserved.
-            This is typically padded data, that is not attended to.
-        output:
-            [B, total_len, d_model] for TraceEncoder, [B, C, N, d_model] for other encoders
         """
         B, C, L = x_enc.shape
 
-        if (self.encoder_type == "patchTST"):
-            # Normalization
-            x_enc = self.normalizer(x=x_enc, mask=pretrain_mask * input_mask, mode="norm")
-            x_enc = torch.nan_to_num(x_enc, nan=0, posinf=0, neginf=0)
-            # Some time-series are too short, so masking them out results in NaNs.
+        #Normalization
+        x_enc = self.normalizer(x=x_enc, mask=pretrain_mask * input_mask, mode="norm")
+        x_enc = torch.nan_to_num(x_enc, nan=0, posinf=0, neginf=0)
 
+        if (self.encoder_type == "patchTST"):
             # Patching and embedding
             enc_in = self.patch_embedding(x_enc, mask=pretrain_mask)
-            # [B, total_len, d_model] or [B, C, N, d_model]
-
             # Encoder
             attention_mask = Masking.convert_seq_to_patch_view(input_mask, self.patch_len)  #[B, C, N]
             enc_out, attns = self.encoder(
@@ -196,56 +294,226 @@ class TS_Encoder(nn.Module):
                 }
             )
             print(enc_out.shape)
+
         elif (self.encoder_type == "Chronos1"):
             print("chronos activated")
-            #Chronos-t5-base
             if (self.chronos_1_pipline == None):
                 from chronos import ChronosPipeline
-
-                #device 확인
                 current_device = x_enc.device
-
                 self.chronos_1_pipline = ChronosPipeline.from_pretrained(
                     "amazon/chronos-t5-base",
                     device_map = current_device,
                     torch_dtype = torch.bfloat16
                 )
-
-                for param in self.chronos_1_pipline.model.parameters():
-                    param.requires_grad = False
             
-            #Chronos 1은 [B, L] 만 받을 수 있으므로 [B, C, L]을 [B * C, L]로 풀어준다
             x_reshaped = x_enc.view(B * C, L)
-
-            #학습할 필요 없으므로 grad 계산x
-            with torch.no_grad():
-                enc_out_reshaped, _ = self.chronos_1_pipline.embed(x_reshaped)
+            enc_out_reshaped, _ = self.chronos_1_pipline.embed(x_reshaped.cpu())
 
             enc_out = enc_out_reshaped.view(B, C, -1, enc_out_reshaped.size(-1))
+            enc_out = enc_out.to(device=current_device, dtype=torch.float32)
 
-            enc_out = enc_out.to(torch.float32)
+            import torch.nn.functional as F
+            enc_out = F.adaptive_avg_pool2d(enc_out, (self.num_patches, self.d_model))
             attns = None
             print("chronos done")
 
         elif (self.encoder_type == "Chronos2"):
-            #Chronos-2
+            print("Chronos2 activated")
+            current_device = x_enc.device
+            
             if (self.chronos_2_pipline == None):
-                from chronos import Chronos2Pipeline
-
-                current_device = x_enc.device
-
-                self.chronos_2_pipline = Chronos2Pipeline.from_pretrained(
-                    "amazon/chronos-2",
+                from chronos import BaseChronosPipeline
+                self.chronos_2_pipline = BaseChronosPipeline.from_pretrained(
+                    "amazon/chronos-2", 
                     device_map = current_device,
                     torch_dtype = torch.bfloat16
                 )
+            
+            x_reshaped = x_enc.view(B * C, 1, L)
+            
+            enc_out_raw = self.chronos_2_pipline.embed(x_reshaped.cpu())
+            
+            def to_tensor_filtered(item):
+                if isinstance(item, (list, tuple)):
+                    tensors = [to_tensor_filtered(x) for x in item]
+                    valid_tensors = [t for t in tensors if t is not None and t.shape[-1] >= 768]
+                    if not valid_tensors: return None
+                    return torch.cat(valid_tensors, dim=1)
+                
+                t = item.clone().detach()
+                if t.shape[-1] == 768: 
+                    return t.unsqueeze(0) if t.dim() == 2 else t
+                return None 
 
-                for param in self.chronos_2_pipline.model.parameters():
-                    param.requires_grad = False
+            enc_out_reshaped = to_tensor_filtered(enc_out_raw)
+            
+            enc_out = enc_out_reshaped.view(B, C, -1, enc_out_reshaped.size(-1))
+            enc_out = enc_out.to(device=current_device, dtype=torch.float32)
+            
+            import torch.nn.functional as F
+            enc_out = F.adaptive_avg_pool2d(enc_out, (self.num_patches, self.d_model))
+            attns = None
+
+        elif (self.encoder_type == "MOIRAI"):
+            print("MOIRAI activated")
+            
+            # RevIN 우회
+            if hasattr(self, "normalizer") and not hasattr(self, "_patched_revin"):
+                if hasattr(self.normalizer, "_denormalize"):
+                    def safe_denorm_bypass(x_in): return x_in 
+                    self.normalizer._denormalize = safe_denorm_bypass
+                self._patched_revin = True
+
+            if not hasattr(self, "moirai_model"):
+                from uni2ts.model.moirai import MoiraiModule
+                current_device = x_enc.device
+                self.moirai_model = MoiraiModule.from_pretrained("Salesforce/moirai-1.0-R-base")
+                self.moirai_model.to(current_device)
+                self.moirai_model.train()
+
+            B, C, L = x_enc.shape
+            B_flat = B * C
+            P_moirai = 128  
+            
+            pad_len = (P_moirai - (L % P_moirai)) % P_moirai
+            import torch.nn.functional as F
+            if pad_len > 0:
+                x_enc_padded = F.pad(x_enc, (0, pad_len))
+            else:
+                x_enc_padded = x_enc
                 
+            L_padded = x_enc_padded.shape[2]
+            target = x_enc_padded.view(B_flat, L_padded, 1)
+            
+            observed_mask = torch.ones((B_flat, L_padded, 1), device=x_enc.device, dtype=torch.bool)
+            if pad_len > 0:
+                observed_mask[:, -pad_len:, :] = False 
                 
-        
-        
+            prediction_mask = torch.zeros((B_flat, L_padded), device=x_enc.device, dtype=torch.bool)
+            
+            sample_id = torch.arange(B, device=x_enc.device).unsqueeze(1).repeat(1, C).view(B_flat, 1).repeat(1, L_padded)
+            time_id = torch.arange(L_padded, device=x_enc.device).unsqueeze(0).repeat(B_flat, 1)
+            variate_id = torch.arange(C, device=x_enc.device).unsqueeze(0).repeat(B, 1).view(B_flat, 1).repeat(1, L_padded)
+            
+            patch_size = torch.tensor([P_moirai], device=x_enc.device, dtype=torch.long)
+
+            captured_embeds = []
+            def capture_hook(module, inputs, output):
+                if isinstance(output, tuple):
+                    captured_embeds.append(output[0])
+                else:
+                    captured_embeds.append(output)
+            
+            hook_handle = self.moirai_model.encoder.register_forward_hook(capture_hook)
+
+            _ = self.moirai_model(
+                target=target,
+                observed_mask=observed_mask,
+                prediction_mask=prediction_mask,
+                sample_id=sample_id,
+                time_id=time_id,
+                variate_id=variate_id,
+                patch_size=patch_size
+            )
+            
+            hook_handle.remove()
+            enc_out = captured_embeds[0].to(dtype=torch.float32)
+
+            if enc_out.dim() == 2: 
+                enc_out = enc_out.unsqueeze(1)
+                
+            enc_out = enc_out.view(B, C, -1, enc_out.shape[-1])
+            
+            if enc_out.shape[-1] != self.d_model:
+                pad_size_dim = self.d_model - enc_out.shape[-1]
+                if pad_size_dim > 0: 
+                    enc_out = F.pad(enc_out, (0, pad_size_dim))
+                else: 
+                    enc_out = enc_out[..., :self.d_model]
+
+            enc_out = F.adaptive_avg_pool2d(enc_out, (self.num_patches, self.d_model))
+            attns = None
+
+        elif (self.encoder_type in ["TimesNet", "TS2Vec", "TimeMixer", "TOTEM"]):
+            print(f"{self.encoder_type} activated")
+            
+            x_input = x_enc.transpose(1, 2) 
+
+            if self.encoder_type in ["TimeMixer", "TimesNet"]:
+                B_val, L_val, C_val = x_input.shape
+                dummy_x_mark_enc = torch.zeros(B_val, L_val, 4, device=x_input.device)
+                dummy_x_dec = torch.zeros(B_val, 0, C_val, device=x_input.device)
+                dummy_x_mark_dec = torch.zeros(B_val, 0, 4, device=x_input.device)
+                dummy_mask = torch.ones_like(x_input)
+                
+                try:
+                    enc_out_raw = self.local_encoder(
+                        x_input, 
+                        dummy_x_mark_enc, 
+                        dummy_x_dec, 
+                        dummy_x_mark_dec, 
+                        mask=dummy_mask
+                    )
+                except TypeError:
+                    enc_out_raw = self.local_encoder(x_input)
+                    
+            elif self.encoder_type == "TOTEM":
+                pad_len = self.totem_seq_len - L
+                if pad_len > 0:
+                    import torch.nn.functional as F
+                    x_input_padded = F.pad(x_input, (0, 0, 0, pad_len))
+                else:
+                    x_input_padded = x_input
+                    
+                dummy_mask = torch.ones_like(x_input_padded)
+                pypots_inputs = {"X": x_input_padded, "missing_mask": dummy_mask}
+                
+                totem_outputs = self.local_encoder.model(pypots_inputs)
+            
+                if isinstance(totem_outputs, dict):
+                    enc_out_raw = totem_outputs.get("imputed_data", totem_outputs.get("reconstruction"))
+                else:
+                    enc_out_raw = totem_outputs
+
+                if pad_len > 0 and enc_out_raw is not None:
+                    enc_out_raw = enc_out_raw[:, :L, :]
+                
+            elif self.encoder_type == "TS2Vec":
+                print("TS2Vec activated")
+                
+                x_input_np = x_input.detach().cpu().numpy()
+                
+                if hasattr(self.local_encoder, 'encode'):
+                    enc_out_raw_np = self.local_encoder.encode(x_input_np)
+                else:
+                    enc_out_raw_np = self.local_encoder(x_input_np)
+                
+                enc_out_raw = torch.from_numpy(enc_out_raw_np).to(x_input.device).float()
+            else:
+                enc_out_raw = self.local_encoder(x_input) 
+
+            if isinstance(enc_out_raw, tuple):
+                enc_out_raw = enc_out_raw[0]
+
+            enc_out = enc_out_raw.to(dtype=torch.float32)
+            
+            if enc_out.shape[-1] != self.d_model:
+                pad_size = self.d_model - enc_out.shape[-1]
+                if pad_size > 0:
+                    import torch.nn.functional as F
+                    enc_out = F.pad(enc_out, (0, pad_size))
+                else:
+                    enc_out = enc_out[:, :, :self.d_model]
+
+            import torch.nn.functional as F
+            enc_out = enc_out.transpose(1, 2) 
+            enc_out = F.adaptive_avg_pool1d(enc_out, self.num_patches) 
+            enc_out = enc_out.transpose(1, 2) 
+            
+            attns = None
+        else:
+            raise ValueError(f"Unknown encoder_type: {self.encoder_type}")
+            
         return enc_out, attns
     
     

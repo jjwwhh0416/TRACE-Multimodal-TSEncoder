@@ -42,8 +42,26 @@ class Pretraining(Tasks):
                     outputs = self.model(
                         x_enc=timeseries, input_mask=input_mask, mask=None
                     )
+                
+                if (self.args.encoder_type == "MOMENT"):
+                    recon = outputs.reconstruction
+                    B, C, L = timeseries.shape # [B, 7, 186]
 
-                recon_loss = self.forecast_criterion(outputs.reconstruction, timeseries)  #[B, C, L]
+                    if recon.shape != timeseries.shape:
+                        if recon.dim() == 3 and recon.shape[1] == recon.shape[2]:
+                            recon = torch.nn.functional.interpolate(recon, size=C, mode='linear', align_corners=False)
+                            recon = recon.transpose(1, 2)
+                        
+                        elif recon.shape[1] == L and recon.shape[2] == C:
+                            recon = recon.transpose(1, 2)
+                        
+                        elif recon.shape != timeseries.shape:
+                            recon = recon.view(timeseries.shape)
+
+                    recon_loss = self.forecast_criterion(recon, timeseries)
+                else:
+                    recon_loss = self.forecast_criterion(outputs.reconstruction, timeseries)  #[B, C, L]
+                
                 # compute loss on (input_mask = 1 & pre-train_mask = 0)
                 observed_mask = input_mask * (1 - outputs.pretrain_mask)  #[B, C, L]
                 masked_loss = observed_mask * recon_loss
@@ -145,7 +163,24 @@ class Pretraining(Tasks):
                 ):
                     outputs = self.model(x_enc=timeseries, input_mask=input_mask)
 
-                recon_loss = self.forecast_criterion(outputs.reconstruction, timeseries)  #[B, C, L]
+                if (self.args.encoder_type == "MOMENT"):
+                    recon = outputs.reconstruction
+                    B, C, L = timeseries.shape
+
+                    if recon.shape != timeseries.shape:
+                        if recon.dim() == 3 and recon.shape[1] == recon.shape[2]:
+                            recon = torch.mean(recon, dim=1, keepdim=True).repeat(1, C, 1)
+                        
+                        elif recon.shape[1] == L and recon.shape[2] == C:
+                            recon = recon.transpose(1, 2)
+                        
+                        if recon.shape != timeseries.shape:
+                            recon = recon.view(B, C, L)
+
+                    recon_loss = self.forecast_criterion(recon, timeseries)  #[B, C, L]
+                else:
+                    recon_loss = self.forecast_criterion(outputs.reconstruction, timeseries)  #[B, C, L]
+                
                 observed_mask = input_mask * (1 - outputs.pretrain_mask)  #[B, C, L]
                 masked_loss = observed_mask * recon_loss  #[B, C, L]
                 recon_loss = masked_loss.nansum() / (observed_mask.nansum() + 1e-7)  #[B, C, L]
