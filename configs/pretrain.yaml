@@ -4,8 +4,6 @@ notes: "Pre-training run"
 
 encoder_type: "patchTST"
 
-checkpoint_path: "./checkpoints/"
-
 # Encoder parameters
 task_name: "pretraining" 
 
@@ -20,7 +18,7 @@ dropout: 0.1
 n_heads: 6
 e_layers: 6
 attention_dropout: 0.1
-torch_dtype: "float32"
+torch_dtype: "bfloat16"
 value_embedding_bias: False # Whether to add biases to the value embeddings
 orth_gain: 1.41
 pos_embed_type: "rel_pos" # "rope" or "rel_pos" add positional embedding to the input
@@ -38,10 +36,10 @@ checkpoint_interval: 1
 debug: False
 
 # Training parameters
-train_batch_size : 2 # 1024 2048 3072 4096
-val_batch_size: 2 # 1024 2048 3072 4096 
+train_batch_size : 256 # 1024 2048 3072 4096
+val_batch_size: 256 # 1024 2048 3072 4096 
 mask_ratio: 0.3
-max_epoch: 1
+max_epoch: 200
 optimizer_name : "AdamW"
 enable_gradient_checkpointing: True
 max_norm: 5
@@ -52,7 +50,7 @@ min_lr: 0.00001 # 1e-5
 lr_decay_rate: 0.9
 warmup_lr: 0.00001 # 1e-5
 warmup_steps: 1000
-use_amp: False
+use_amp: True
 beta: 1
 distributed: True
 early_stop: False
@@ -71,6 +69,6 @@ downsampling_type : "interpolate"
 pad_mode : "constant"
 pad_constant_values : 0
 shuffle : True
-num_workers : 0
+num_workers : 5
 pin_memory : True
 drop_last : False
