@@ -259,7 +259,6 @@ class Tasks(nn.Module):
 
     def setup_logger(self, notes: str = None):
         self.logger = wandb.init(
-            project="Timeseries Multimodal Foundation Model",
             entity="jjwwhh",
             project="pretrain",
             dir=PATHS.WANDB_DIR,
