@@ -109,6 +109,11 @@ class PretrainingDataset(TaskDataset):
         # self.input_mask = self.input_mask.T
 
     def __getitem__(self, index):
+        print("labels:", self.labels[:10])
+        print("unique:", np.unique(self.labels))
+        print("min:", np.min(self.labels))
+        print("max:", np.max(self.labels))
+
         assert index < self.__len__()
 
         timeseries = self.data[index]      # [C, L]
