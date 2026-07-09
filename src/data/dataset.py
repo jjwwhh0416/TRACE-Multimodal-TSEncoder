@@ -12,6 +12,7 @@ from src.data.load_data import load_timeseries_from_json, load_npy_timeseries, l
 from src.utils.data import (
     interpolate_timeseries,
     upsample_timeseries,
+    downsample_timeseries,
 )
 from .base import TaskDataset, TimeseriesData
 import torch
@@ -22,7 +23,7 @@ class PretrainingDataset(TaskDataset):
     def __init__(
         self,
         seq_len_channel: int = 180,
-        root_path: str = os.environ.get("TTRAG_DATA_DIR", "./dataset/" + "pretraining/"),
+        root_path: str = os.environ.get("TTRAG_DATA_DIR"),
         data_split: str = "train",
         scale: bool = True,
         task_name: str = TASKS.PRETRAINING,
@@ -248,12 +249,13 @@ class ForecastingDataset(TaskDataset):
     def __getitem__(self, index):
         assert index < self.__len__()
 
-        timeseries = self.data[index] # [C, L]
-        forecast = self.forecast_data[index] # [C, H]
-        assert forecast.shape[-1] == self.forecast_len  
+        timeseries = self.data[index]      # [C, L]
+        forecast = self.forecast_data[index]   # [C, H]
+        assert forecast.shape[-1] == self.forecast_len
+
         timeseries_len = timeseries.shape[1]
-        
-        ## padding to the same length
+
+        ## padding / downsampling
         if timeseries_len <= self.seq_len_channel:
             timeseries, input_mask = upsample_timeseries(
                 timeseries,
@@ -262,11 +264,26 @@ class ForecastingDataset(TaskDataset):
                 sampling_type=self.upsampling_type,
                 mode=self.pad_mode,
             )
+        else:
+            downsampled = []
+            masks = []
+
+            for c in range(timeseries.shape[0]):
+                ts, mask = downsample_timeseries(
+                    timeseries[c],
+                    self.seq_len_channel,
+                    sampling_type=self.downsampling_type,
+                )
+                downsampled.append(ts)
+                masks.append(mask)
+
+            timeseries = np.stack(downsampled, axis=0)
+            input_mask = np.stack(masks, axis=0)
 
         return TimeseriesData(
-            timeseries=timeseries,  # [C, L]
-            forecast=forecast,  # [C, H]
-            input_mask=input_mask,  # [C,L]
+            timeseries=timeseries,      # [C, seq_len_channel]
+            forecast=forecast,          # [C, H]
+            input_mask=input_mask,      # [C, seq_len_channel]
         )
 
     def __len__(self):
