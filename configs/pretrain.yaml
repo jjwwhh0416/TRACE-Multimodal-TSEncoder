@@ -1,6 +1,6 @@
 #Experiment parameters
 random_seed: 13
-notes: "Pre-training run"
+notes: "CAN bus pre-training run"
 
 encoder_type: "patchTST"
 
@@ -9,7 +9,7 @@ task_name: "pretraining"
 
 # Model parameters
 model_name: "TraceEncoder"
-seq_len_channel: 186
+seq_len_channel: 300
 patch_len: 6
 patch_stride_len: 6
 revin_affine: False
@@ -51,7 +51,8 @@ lr_decay_rate: 0.9
 warmup_lr: 0.00001 # 1e-5
 warmup_steps: 1000
 use_amp: True
-beta: 1
+classification_label_smoothing: 0.05
+beta: 0.2
 distributed: True
 early_stop: False
 patience: 100
@@ -62,7 +63,7 @@ delta: 0.0001
 # Dataset parameters
 n_channels: 6
 num_class: 13
-scale : False
+scale : True
 upsampling_pad_direction : "backward"
 upsampling_type : "pad"
 downsampling_type : "interpolate"
