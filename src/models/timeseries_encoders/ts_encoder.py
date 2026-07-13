@@ -295,10 +295,10 @@ class TS_Encoder(nn.Module):
             )
 
         elif (self.encoder_type == "Chronos1"):
+            current_device = x_enc.device
             print("chronos activated")
             if (self.chronos_1_pipline == None):
                 from chronos import ChronosPipeline
-                current_device = x_enc.device
                 self.chronos_1_pipline = ChronosPipeline.from_pretrained(
                     "amazon/chronos-t5-base",
                     device_map = current_device,
@@ -306,7 +306,7 @@ class TS_Encoder(nn.Module):
                 )
             
             x_reshaped = x_enc.view(B * C, L)
-            enc_out_reshaped, _ = self.chronos_1_pipline.embed(x_reshaped.cpu())
+            enc_out_reshaped, _ = self.chronos_1_pipline.embed(x_reshaped)
 
             enc_out = enc_out_reshaped.view(B, C, -1, enc_out_reshaped.size(-1))
             enc_out = enc_out.to(device=current_device, dtype=torch.float32)
@@ -330,7 +330,7 @@ class TS_Encoder(nn.Module):
             
             x_reshaped = x_enc.view(B * C, 1, L)
             
-            enc_out_raw = self.chronos_2_pipline.embed(x_reshaped.cpu())
+            enc_out_raw = self.chronos_2_pipline.embed(x_reshaped)
             
             def to_tensor_filtered(item):
                 if isinstance(item, (list, tuple)):
