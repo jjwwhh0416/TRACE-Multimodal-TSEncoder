@@ -163,37 +163,37 @@ class Pretraining(Tasks):
                 ):
                     outputs = self.model(x_enc=timeseries, input_mask=input_mask)
 
-                if (self.args.encoder_type == "MOMENT"):
-                    recon = outputs.reconstruction
-                    B, C, L = timeseries.shape
+                    if (self.args.encoder_type == "MOMENT"):
+                        recon = outputs.reconstruction
+                        B, C, L = timeseries.shape
 
-                    if recon.shape != timeseries.shape:
-                        if recon.dim() == 3 and recon.shape[1] == recon.shape[2]:
-                            recon = torch.mean(recon, dim=1, keepdim=True).repeat(1, C, 1)
-                        
-                        elif recon.shape[1] == L and recon.shape[2] == C:
-                            recon = recon.transpose(1, 2)
-                        
                         if recon.shape != timeseries.shape:
-                            recon = recon.view(B, C, L)
+                            if recon.dim() == 3 and recon.shape[1] == recon.shape[2]:
+                                recon = torch.mean(recon, dim=1, keepdim=True).repeat(1, C, 1)
+                            
+                            elif recon.shape[1] == L and recon.shape[2] == C:
+                                recon = recon.transpose(1, 2)
+                            
+                            if recon.shape != timeseries.shape:
+                                recon = recon.view(B, C, L)
 
-                    recon_loss = self.forecast_criterion(recon, timeseries)  #[B, C, L]
-                else:
-                    recon_loss = self.forecast_criterion(outputs.reconstruction, timeseries)  #[B, C, L]
-                
-                observed_mask = input_mask * (1 - outputs.pretrain_mask)  #[B, C, L]
-                masked_loss = observed_mask * recon_loss  #[B, C, L]
-                recon_loss = masked_loss.nansum() / (observed_mask.nansum() + 1e-7)  #[B, C, L]
-                labeled_mask = (labels != -100)
-                if labeled_mask.any():
-                    classification_loss = self.classification_criterion(
-                        outputs.classification, labels
-                    )
-                    print("classification_loss:", classification_loss.item())
-                else:
-                    classification_loss = 0.0 * outputs.classification.sum()
-                
-                total_loss = recon_loss + self.args.beta * classification_loss
+                        recon_loss = self.forecast_criterion(recon, timeseries)  #[B, C, L]
+                    else:
+                        recon_loss = self.forecast_criterion(outputs.reconstruction, timeseries)  #[B, C, L]
+                    
+                    observed_mask = input_mask * (1 - outputs.pretrain_mask)  #[B, C, L]
+                    masked_loss = observed_mask * recon_loss  #[B, C, L]
+                    recon_loss = masked_loss.nansum() / (observed_mask.nansum() + 1e-7)  #[B, C, L]
+                    labeled_mask = (labels != -100)
+                    if labeled_mask.any():
+                        classification_loss = self.classification_criterion(
+                            outputs.classification, labels
+                        )
+                        print("classification_loss:", classification_loss.item())
+                    else:
+                        classification_loss = 0.0 * outputs.classification.sum()
+                    
+                    total_loss = recon_loss + self.args.beta * classification_loss
                 
                 if self.args.rank == 0:
                     self.logger.log(
