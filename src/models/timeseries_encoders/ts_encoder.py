@@ -356,14 +356,10 @@ class TS_Encoder(nn.Module):
         elif (self.encoder_type == "MOMENT"):
             print("MOMENT activated")
             
-            # 💡 [핵심 방어막] 차원 충돌 원천 봉쇄: MOMENT 사용 시 RevIN 바이패스
+            # RevIN 바이패스 (차원 충돌 방지)
             if hasattr(self, "normalizer") and not hasattr(self, "_patched_revin"):
                 if hasattr(self.normalizer, "_denormalize"):
-                    # 기존 함수를 보존하되, MOMENT일 경우 통과시키도록 재정의
-                    def safe_denorm_bypass(x_in):
-                        # RevIN의 상태(저장된 통계값)를 건드리지 않고,
-                        # MOMENT의 출력을 그대로 반환하여 차원 불일치 에러 방지
-                        return x_in 
+                    def safe_denorm_bypass(x_in): return x_in 
                     self.normalizer._denormalize = safe_denorm_bypass
                 self._patched_revin = True
 
@@ -371,18 +367,13 @@ class TS_Encoder(nn.Module):
                 from momentfm import MOMENTPipeline
                 current_device = x_enc.device
                 
-                # 💡 [원천 차단] 허깅페이스에서 로드할 때부터 torch_dtype을 Float32로 강제 고정합니다.
+                # 💡 [핵심 1] 억지로 바꾸지 않고, MOMENT의 고향인 BFloat16으로 자연스럽게 로드합니다.
                 self.moment_model = MOMENTPipeline.from_pretrained(
                     "AutonLab/MOMENT-1-base", 
                     model_kwargs={"task_name": "embedding"},
-                    torch_dtype=torch.float32
+                    torch_dtype=torch.bfloat16
                 )
-                
                 self.moment_model.to(current_device)
-                
-                # 💡 [확인 사살] 파이프라인 하위의 모든 모듈, 파라미터, 버퍼를 재귀적으로 Float32로 덮어씌웁니다.
-                self.moment_model = self.moment_model.float()
-                
                 self.moment_model.train() 
                 self.moment_model.task_name = "embedding"
 
@@ -398,7 +389,10 @@ class TS_Encoder(nn.Module):
             else:
                 x_input_padded = x_reshaped
 
-            # 모델 통과
+            # 💡 [핵심 2] 모델에 들어가기 직전, 입력을 BFloat16으로 변환해줍니다.
+            x_input_padded = x_input_padded.to(dtype=torch.bfloat16)
+
+            # 모델 통과 (전체 BFloat16 연산)
             moment_outputs = self.moment_model(x_enc=x_input_padded)
             
             # 임베딩 추출 안전장치
@@ -411,6 +405,7 @@ class TS_Encoder(nn.Module):
                             enc_out = v
                             break
 
+            # 💡 [핵심 3] TRACE 파이프라인 연산과 Loss 계산을 위해 다시 Float32로 복구합니다!
             enc_out = enc_out.to(dtype=torch.float32)
 
             if enc_out.dim() == 2:
