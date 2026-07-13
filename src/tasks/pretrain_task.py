@@ -214,6 +214,7 @@ class Pretraining(Tasks):
 
                 # 1. 4번 누적할 것이므로 Loss를 4로 나누어 평균을 유지합니다.
                 loss = total_loss / accumulation_steps
+                loss = loss.to(torch.bfloat16)
                 loss.backward()
 
                 # 2. 4번째 스텝이거나, 데이터로더의 마지막 배치일 때만 업데이트를 진행합니다.
