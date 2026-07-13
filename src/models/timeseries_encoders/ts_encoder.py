@@ -366,33 +366,43 @@ class TS_Encoder(nn.Module):
             if not hasattr(self, "moment_model"):
                 from momentfm import MOMENTPipeline
                 current_device = x_enc.device
-                
-                # 💡 [핵심 1] 억지로 바꾸지 않고, MOMENT의 고향인 BFloat16으로 자연스럽게 로드합니다.
                 self.moment_model = MOMENTPipeline.from_pretrained(
                     "AutonLab/MOMENT-1-base", 
                     model_kwargs={"task_name": "embedding"},
-                    torch_dtype=torch.bfloat16
                 )
                 self.moment_model.to(current_device)
+                
+                # 💡 [핵심 1] 파이프라인 껍데기를 뚫고 들어가 '진짜 내부 모델'을 Float32로 강제 변환합니다!
+                if hasattr(self.moment_model, "model"):
+                    self.moment_model.model = self.moment_model.model.to(dtype=torch.float32)
+                
+                # 안전장치: 혹시 다른 서브 모듈이 있다면 전부 캐스팅
+                for attr_name in dir(self.moment_model):
+                    attr = getattr(self.moment_model, attr_name)
+                    if isinstance(attr, torch.nn.Module):
+                        attr.to(dtype=torch.float32)
+                        
                 self.moment_model.train() 
                 self.moment_model.task_name = "embedding"
 
-            # 독립 채널 입력 구성
-            B, L, C = x_enc.shape
-            x_reshaped = x_enc.transpose(1, 2).reshape(B * C, 1, L)
+            # 💡 [핵심 2] 치명적이었던 차원 언패킹 버그 수정 (B, C, L이 맞습니다)
+            B, C, L = x_enc.shape
+            
+            # x_enc는 이미 [B, C, L]이므로 바로 Reshape 처리 [B*C, 1, L]
+            x_reshaped = x_enc.reshape(B * C, 1, L)
             
             # 8의 배수로 패딩
-            pad_len = 8 - (L % 8) if (L % 8) != 0 else 0
+            pad_len = (8 - (L % 8)) % 8
+            import torch.nn.functional as F
             if pad_len > 0:
-                import torch.nn.functional as F
                 x_input_padded = F.pad(x_reshaped, (0, pad_len))
             else:
                 x_input_padded = x_reshaped
 
-            # 💡 [핵심 2] 모델에 들어가기 직전, 입력을 BFloat16으로 변환해줍니다.
-            x_input_padded = x_input_padded.to(dtype=torch.bfloat16)
+            # 입력 데이터도 명확하게 Float32로 쐐기 박기
+            x_input_padded = x_input_padded.to(dtype=torch.float32)
 
-            # 모델 통과 (전체 BFloat16 연산)
+            # 모델 통과
             moment_outputs = self.moment_model(x_enc=x_input_padded)
             
             # 임베딩 추출 안전장치
@@ -405,15 +415,15 @@ class TS_Encoder(nn.Module):
                             enc_out = v
                             break
 
-            # 💡 [핵심 3] TRACE 파이프라인 연산과 Loss 계산을 위해 다시 Float32로 복구합니다!
             enc_out = enc_out.to(dtype=torch.float32)
 
+            # 차원 복구 [B*C, 1, Length] -> [B, C, Length]
             if enc_out.dim() == 2:
                 enc_out = enc_out.unsqueeze(1)
             elif enc_out.dim() == 3 and enc_out.shape[1] > enc_out.shape[2]: 
                 enc_out = enc_out.transpose(1, 2)
             
-            import torch.nn.functional as F
+            # TRACE 파이프라인 규격에 맞게 d_model 보정
             if enc_out.shape[-1] != self.d_model:
                 pad_size = self.d_model - enc_out.shape[-1]
                 if pad_size > 0:
@@ -421,6 +431,7 @@ class TS_Encoder(nn.Module):
                 else:
                     enc_out = enc_out[..., :self.d_model]
 
+            # 최종 출력 형태 [B, C, TRACE_Num_Patches, d_model]
             enc_out = enc_out.view(B, C, -1, self.d_model)
             enc_out = F.adaptive_avg_pool2d(enc_out, (self.num_patches, self.d_model))
             attns = None
