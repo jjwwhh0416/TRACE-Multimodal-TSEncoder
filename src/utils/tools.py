@@ -53,7 +53,7 @@ def make_dir_if_not_exists(path, verbose=True):
     if not is_directory(path):
         path = path.split(".")[0]
     if not os.path.exists(path=path):
-        os.makedirs(path)
+        os.makedirs(path, exist_ok=True)
         if verbose:
             print(f"Making directory: {path}...")
     return True

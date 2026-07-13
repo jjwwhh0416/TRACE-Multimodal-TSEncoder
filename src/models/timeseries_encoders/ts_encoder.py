@@ -370,11 +370,19 @@ class TS_Encoder(nn.Module):
             if not hasattr(self, "moment_model"):
                 from momentfm import MOMENTPipeline
                 current_device = x_enc.device
+                
+                # 💡 [원천 차단] 허깅페이스에서 로드할 때부터 torch_dtype을 Float32로 강제 고정합니다.
                 self.moment_model = MOMENTPipeline.from_pretrained(
                     "AutonLab/MOMENT-1-base", 
-                    model_kwargs={"task_name": "embedding"}
+                    model_kwargs={"task_name": "embedding"},
+                    torch_dtype=torch.float32
                 )
-                self.moment_model.to(device=current_device, dtype=torch.float32)
+                
+                self.moment_model.to(current_device)
+                
+                # 💡 [확인 사살] 파이프라인 하위의 모든 모듈, 파라미터, 버퍼를 재귀적으로 Float32로 덮어씌웁니다.
+                self.moment_model = self.moment_model.float()
+                
                 self.moment_model.train() 
                 self.moment_model.task_name = "embedding"
 
